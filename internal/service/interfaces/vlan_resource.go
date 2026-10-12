@@ -124,7 +124,12 @@ func exactVlanReplacement(prior *vlanResourceModel, candidates []opninterfaces.V
 	}
 	matches := []string{}
 	for _, row := range candidates {
-		if row.Device != device || row.Tag != fmt.Sprintf("%d", prior.Tag.ValueInt64()) ||
+		// OPNsense SearchVlan displays the descriptive suffix in vlanif,
+		// e.g. "vlan3990 [Issue #103 ...]", whereas GetVlan and Terraform
+		// state keep the canonical device "vlan3990". Accept only the
+		// EXACT expected decorated name, never arbitrary suffixes.
+		if (row.Device != device && row.Device != fmt.Sprintf("%s [%s]", device, description)) ||
+			row.Tag != fmt.Sprintf("%d", prior.Tag.ValueInt64()) ||
 			row.Parent.String() != parent || row.Description != description {
 			continue
 		}

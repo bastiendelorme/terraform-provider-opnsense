@@ -24,6 +24,14 @@ func TestExactVlanReplacement(t *testing.T) {
 	if err != nil || id != candidate.UUID {
 		t.Fatalf("expected exact reattachment %q, got %q, %v", candidate.UUID, id, err)
 	}
+	// Actual OPNsense search_item VLAN rows use vlanif with a suffix
+	// containing the description, unlike canonical GetVlan rows.
+	decorated := candidate
+	decorated.Device = "vlan3990 [issue103 endpoint]"
+	id, err = exactVlanReplacement(base, []opninterfaces.Vlan{decorated})
+	if err != nil || id != candidate.UUID {
+		t.Fatalf("decorated search device should reattach exact VLAN: id=%q err=%v", id, err)
+	}
 
 	cases := []struct {
 		name     string
@@ -35,6 +43,7 @@ func TestExactVlanReplacement(t *testing.T) {
 		{"ambiguous matches", base, []opninterfaces.Vlan{candidate, candidate}, "found 2"},
 		{"different parent", base, []opninterfaces.Vlan{{UUID: "other", Device: "vlan3990", Tag: "3990", Parent: api.SelectedMap("vtnet0"), Description: "issue103 endpoint"}}, "found 0"},
 		{"different description", base, []opninterfaces.Vlan{{UUID: "other", Device: "vlan3990", Tag: "3990", Parent: api.SelectedMap("vtnet1"), Description: "local infrastructure"}}, "found 0"},
+		{"decorated unrelated description", base, []opninterfaces.Vlan{{UUID: "other", Device: "vlan3990 [other]", Tag: "3990", Parent: api.SelectedMap("vtnet1"), Description: "issue103 endpoint"}}, "found 0"},
 		{"missing uuid", base, []opninterfaces.Vlan{{Device: "vlan3990", Tag: "3990", Parent: api.SelectedMap("vtnet1"), Description: "issue103 endpoint"}}, "no UUID"},
 		{"noncanonical device", &vlanResourceModel{Device: types.StringValue("vlan-other"), Parent: types.StringValue("vtnet1"), Tag: types.Int64Value(3990)}, []opninterfaces.Vlan{candidate}, "canonical"},
 	}

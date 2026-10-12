@@ -25,7 +25,7 @@ func TestReattachVlanHTTPContract(t *testing.T) {
 		"total": 1, "rowCount": 1, "current": 1,
 		"rows": []map[string]any{{
 			"uuid": "new-vlan-uuid", "descr": "Issue #103 shared-test Ubuntu endpoint state continuity",
-			"vlanif": "vlan3990", "tag": "3990",
+			"vlanif": "vlan3990 [Issue #103 shared-test Ubuntu endpoint state continuity]", "tag": "3990",
 			"if": map[string]any{
 				"vtnet0": map[string]any{"selected": 0, "value": "vtnet0"},
 				"vtnet1": map[string]any{"selected": 1, "value": "vtnet1"},

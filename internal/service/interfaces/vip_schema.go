@@ -177,7 +177,12 @@ func convertVipStructToSchema(d *apiinterfaces.Vip) (*vipResourceModel, error) {
 		advertisementBase = 1
 	}
 	advertisementSkew := tools.StringToInt64(d.AdvertisementSkew)
-	if advertisementSkew < 0 {
+	if advertisementSkew < 0 || d.Mode.String() != "carp" {
+		// OPNsense may report a receiver-local HA skew (e.g. 200) for
+		// IPv6 IP Alias entries after XMLRPC sync. Only CARP VIPs emit
+		// advertisements; the skew is inert for ipalias/proxyarp. Keep
+		// non-CARP Terraform state at the schema's canonical default 0
+		// so a clean HA reimage does not trigger a destructive sync barrier.
 		advertisementSkew = 0
 	}
 	return &vipResourceModel{
