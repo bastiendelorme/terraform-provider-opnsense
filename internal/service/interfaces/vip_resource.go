@@ -7,6 +7,7 @@ import (
 
 	"github.com/biptec/opnsense-go/pkg/api"
 	"github.com/biptec/opnsense-go/pkg/errs"
+	opninterfaces "github.com/biptec/opnsense-go/pkg/interfaces"
 	"github.com/biptec/opnsense-go/pkg/opnsense"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -152,6 +153,52 @@ func (r *vipResource) Create(ctx context.Context, req resource.CreateRequest, re
 	tflog.Trace(ctx, "created a resource", map[string]any{"id": id})
 }
 
+// A receiver-created VIP may have a different UUID after a clean router
+// rebuild. Reattach only by an exact, unique, stable semantic identity. CARP
+// advskew and write-only password are deliberately NOT part of that identity:
+// they are locally configured values and must not be copied from a peer.
+func exactVipReplacement(prior *vipResourceModel, rows []opninterfaces.Vip) (string, error) {
+	mode := prior.Mode.ValueString()
+	iface := prior.Interface.ValueString()
+	network := prior.Network.ValueString()
+	description := prior.Description.ValueString()
+	if prior.Mode.IsNull() || prior.Mode.IsUnknown() || prior.Interface.IsNull() || prior.Interface.IsUnknown() ||
+		prior.Network.IsNull() || prior.Network.IsUnknown() || mode == "" || iface == "" || network == "" ||
+		prior.Description.IsNull() || prior.Description.IsUnknown() || description == "" {
+		return "", fmt.Errorf("old VIP state lacks an exact semantic identity")
+	}
+	vhid := ""
+	if !prior.VHID.IsNull() && !prior.VHID.IsUnknown() {
+		vhid = fmt.Sprintf("%d", prior.VHID.ValueInt64())
+	}
+	matches := []string{}
+	for _, row := range rows {
+		if row.Mode.String() != mode || row.Interface.String() != iface ||
+			row.Network != network || row.Description != description || row.VHID != vhid {
+			continue
+		}
+		if row.UUID == "" {
+			return "", fmt.Errorf("matched VIP has no UUID")
+		}
+		matches = append(matches, row.UUID)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected exactly one matching VIP, found %d", len(matches))
+	}
+	return matches[0], nil
+}
+
+func (r *vipResource) reattachVip(ctx context.Context, prior *vipResourceModel) (string, error) {
+	result, err := r.client.Interfaces().SearchVip(ctx)
+	if err != nil {
+		return "", fmt.Errorf("search replacement VIP: %w", err)
+	}
+	if result == nil || result.Total > len(result.Rows) {
+		return "", fmt.Errorf("incomplete VIP search response; cannot safely reattach")
+	}
+	return exactVipReplacement(prior, result.Rows)
+}
+
 func (r *vipResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data *vipResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
@@ -163,12 +210,28 @@ func (r *vipResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 	if err != nil {
 		var notFoundError *errs.NotFoundError
 		if errors.As(err, &notFoundError) {
-			tflog.Warn(ctx, "vip not present in remote, removing from state")
-			resp.State.RemoveResource(ctx)
+			// Only explicitly described endpoint-like VIPs have a stable identity
+			// strong enough for automatic reattachment. Preserve legacy behavior
+			// for unnamed/non-endpoint VIPs.
+			if data.Description.IsNull() || data.Description.IsUnknown() || data.Description.ValueString() == "" {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			id, reattachErr := r.reattachVip(ctx, data)
+			if reattachErr != nil {
+				resp.Diagnostics.AddError("Unable to Reattach VIP After Router Replacement", reattachErr.Error())
+				return
+			}
+			state, err = r.readState(ctx, id, data)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to Read Reattached VIP", err.Error())
+				return
+			}
+			tflog.Info(ctx, "reattached VIP with changed OPNsense UUID")
+		} else {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read vip, got error: %s", err))
 			return
 		}
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read vip, got error: %s", err))
-		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }

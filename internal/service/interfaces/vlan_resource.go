@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/biptec/opnsense-go/pkg/api"
 	"github.com/biptec/opnsense-go/pkg/errs"
+	opninterfaces "github.com/biptec/opnsense-go/pkg/interfaces"
 	"github.com/biptec/opnsense-go/pkg/opnsense"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -106,6 +108,48 @@ func (r *vlanResource) Create(ctx context.Context, req resource.CreateRequest, r
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
+// exactVlanReplacement finds exactly one replacement for a lost UUID.
+// A device with a non-empty, canonical name uniquely identifies a managed
+// endpoint VLAN only together with its parent, tag and description. Never
+// guess among duplicates or adopt a local-only VLAN on a partial match.
+func exactVlanReplacement(prior *vlanResourceModel, candidates []opninterfaces.Vlan) (string, error) {
+	device := prior.Device.ValueString()
+	parent := prior.Parent.ValueString()
+	description := prior.Description.ValueString()
+	if prior.Device.IsNull() || prior.Device.IsUnknown() || device == "" ||
+		prior.Parent.IsNull() || prior.Parent.IsUnknown() || parent == "" ||
+		prior.Tag.IsNull() || prior.Tag.IsUnknown() || !strings.HasPrefix(device, "vlan") ||
+		device != fmt.Sprintf("vlan%d", prior.Tag.ValueInt64()) {
+		return "", fmt.Errorf("prior VLAN state lacks a canonical device, parent and tag for safe reattachment")
+	}
+	matches := []string{}
+	for _, row := range candidates {
+		if row.Device != device || row.Tag != fmt.Sprintf("%d", prior.Tag.ValueInt64()) ||
+			row.Parent.String() != parent || row.Description != description {
+			continue
+		}
+		if row.UUID == "" {
+			return "", fmt.Errorf("matched VLAN has no UUID")
+		}
+		matches = append(matches, row.UUID)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected exactly one matching VLAN, found %d", len(matches))
+	}
+	return matches[0], nil
+}
+
+func (r *vlanResource) reattachVlan(ctx context.Context, prior *vlanResourceModel) (string, error) {
+	result, err := r.client.Interfaces().SearchVlan(ctx)
+	if err != nil {
+		return "", fmt.Errorf("search replacement VLAN: %w", err)
+	}
+	if result == nil || result.Total > len(result.Rows) {
+		return "", fmt.Errorf("incomplete VLAN search response; cannot reattach safely")
+	}
+	return exactVlanReplacement(prior, result.Rows)
+}
+
 func (r *vlanResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data *vlanResourceModel
 
@@ -121,14 +165,33 @@ func (r *vlanResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	if err != nil {
 		var notFoundError *errs.NotFoundError
 		if errors.As(err, &notFoundError) {
-			tflog.Warn(ctx, "vlan not present in remote, removing from state")
-			resp.State.RemoveResource(ctx)
+			// Preserve normal Terraform recreation semantics for legacy VLANs
+			// without the canonical endpoint device identity.
+			if data.Device.IsNull() || data.Device.IsUnknown() ||
+				data.Tag.IsNull() || data.Tag.IsUnknown() ||
+				data.Device.ValueString() != fmt.Sprintf("vlan%d", data.Tag.ValueInt64()) {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			// Explicit, fail-closed reattachment keeps pre-rebuild endpoint state
+			// usable without imports or any saved UUID manifest.
+			id, reattachErr := r.reattachVlan(ctx, data)
+			if reattachErr != nil {
+				resp.Diagnostics.AddError("Unable to Reattach VLAN After Router Replacement", reattachErr.Error())
+				return
+			}
+			vlan, err = r.client.Interfaces().GetVlan(ctx, id)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to Read Reattached VLAN", err.Error())
+				return
+			}
+			data.Id = types.StringValue(id)
+			tflog.Info(ctx, "reattached VLAN with changed OPNsense UUID")
+		} else {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read vlan, got error: %s", err))
 			return
 		}
 
-		resp.Diagnostics.AddError("Client Error",
-			fmt.Sprintf("Unable to read vlan, got error: %s", err))
-		return
 	}
 
 	// Convert OPNsense struct to TF schema
