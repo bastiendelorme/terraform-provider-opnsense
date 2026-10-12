@@ -8,6 +8,7 @@ import (
 	"github.com/biptec/opnsense-go/pkg/api"
 	"github.com/biptec/opnsense-go/pkg/errs"
 	"github.com/biptec/opnsense-go/pkg/opnsense"
+	apiroutes "github.com/biptec/opnsense-go/pkg/routes"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -106,6 +107,64 @@ func (r *routeResource) Create(ctx context.Context, req resource.CreateRequest, 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
+// Routes do not have a stable UUID across clean native HA restores.
+// Description and network provide a candidate key; the gateway is verified
+// through the typed GET endpoint before the retained state is reattached.
+func exactRouteCandidate(prior *routeResourceModel, rows []map[string]any) (string, error) {
+	if prior.Description.IsNull() || prior.Description.IsUnknown() || prior.Description.ValueString() == "" ||
+		prior.Network.IsNull() || prior.Network.IsUnknown() || prior.Network.ValueString() == "" ||
+		prior.Gateway.IsNull() || prior.Gateway.IsUnknown() || prior.Gateway.ValueString() == "" {
+		return "", fmt.Errorf("route lacks description, network, or gateway identity")
+	}
+	matches := []string{}
+	for _, row := range rows {
+		description, ok := row["descr"].(string)
+		if !ok || description != prior.Description.ValueString() {
+			continue
+		}
+		network, ok := row["network"].(string)
+		if !ok || network != prior.Network.ValueString() {
+			continue
+		}
+		uuid, ok := row["uuid"].(string)
+		if !ok || uuid == "" {
+			return "", fmt.Errorf("matching route lacks UUID")
+		}
+		matches = append(matches, uuid)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected exactly one matching route, found %d", len(matches))
+	}
+	return matches[0], nil
+}
+
+func (r *routeResource) reattachRoute(ctx context.Context, prior *routeResourceModel) (string, *apiroutes.Route, error) {
+	result, err := api.Search[map[string]any](
+		r.client.Routes().Client(), ctx,
+		api.Endpoint{Path: "/routes/routes/searchroute", Method: "POST"},
+	)
+	if err != nil {
+		return "", nil, fmt.Errorf("search replacement routes: %w", err)
+	}
+	if result == nil || result.Total > len(result.Rows) {
+		return "", nil, fmt.Errorf("incomplete route search response; cannot safely reattach")
+	}
+	id, err := exactRouteCandidate(prior, result.Rows)
+	if err != nil {
+		return "", nil, err
+	}
+	remote, err := r.client.Routes().GetRoute(ctx, id)
+	if err != nil {
+		return "", nil, fmt.Errorf("read matching route: %w", err)
+	}
+	if remote.Description != prior.Description.ValueString() ||
+		remote.Network != prior.Network.ValueString() ||
+		remote.Gateway.String() != prior.Gateway.ValueString() {
+		return "", nil, fmt.Errorf("candidate route has different network, gateway, or description")
+	}
+	return id, remote, nil
+}
+
 func (r *routeResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data *routeResourceModel
 
@@ -121,14 +180,24 @@ func (r *routeResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	if err != nil {
 		var notFoundError *errs.NotFoundError
 		if errors.As(err, &notFoundError) {
-			tflog.Warn(ctx, "route not present in remote, removing from state")
-			resp.State.RemoveResource(ctx)
+			// Missing unnamed routes retain Terraform's conventional behavior.
+			// Named endpoint routes fail closed if identity is ambiguous.
+			if data.Description.IsNull() || data.Description.IsUnknown() ||
+				data.Description.ValueString() == "" {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			id, found, findErr := r.reattachRoute(ctx, data)
+			if findErr != nil {
+				resp.Diagnostics.AddError("Unable to Reattach Route After Router Replacement", findErr.Error())
+				return
+			}
+			data.Id = types.StringValue(id)
+			route = found
+		} else {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read route, got error: %s", err))
 			return
 		}
-
-		resp.Diagnostics.AddError("Client Error",
-			fmt.Sprintf("Unable to read route, got error: %s", err))
-		return
 	}
 
 	// Convert OPNsense struct to TF schema

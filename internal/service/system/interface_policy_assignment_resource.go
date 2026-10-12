@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/biptec/opnsense-go/pkg/api"
 	apiextensions "github.com/biptec/opnsense-go/pkg/api_extensions"
@@ -69,6 +70,44 @@ func (r *interfacePolicyAssignmentResource) Create(ctx context.Context, req reso
 	resp.Diagnostics.Append(resp.State.Set(ctx, interfacePolicyAssignmentFromAPI(remote, id))...)
 }
 
+// New OPNsense routers generate local MVC UUIDs. An endpoint policy
+// relation is reattached only on exact, unique interface + policy identity.
+func exactPolicyAssignmentReplacement(
+	prior *interfacePolicyAssignmentResourceModel,
+	rows []map[string]string,
+) (string, error) {
+	if prior.Interface.IsNull() || prior.Interface.IsUnknown() || prior.Interface.ValueString() == "" ||
+		prior.PolicyID.IsNull() || prior.PolicyID.IsUnknown() || prior.PolicyID.ValueString() == "" {
+		return "", fmt.Errorf("prior policy assignment lacks a stable interface and policy identifier")
+	}
+	matches := []string{}
+	for _, row := range rows {
+		if row["interface"] == prior.Interface.ValueString() && row["policy_id"] == prior.PolicyID.ValueString() {
+			if row["uuid"] == "" {
+				return "", fmt.Errorf("matching policy assignment has no UUID")
+			}
+			matches = append(matches, row["uuid"])
+		}
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected exactly one matching policy assignment, found %d", len(matches))
+	}
+	return matches[0], nil
+}
+
+func (r *interfacePolicyAssignmentResource) reattach(ctx context.Context, prior *interfacePolicyAssignmentResourceModel) (string, error) {
+	result, err := api.Search[map[string]string](
+		r.client.ApiExtensions().Client(), ctx, apiextensions.InterfacePolicyAssignmentOpts.Search,
+	)
+	if err != nil {
+		return "", fmt.Errorf("search policy assignments: %w", err)
+	}
+	if result == nil || result.Total > len(result.Rows) {
+		return "", fmt.Errorf("incomplete assignment search response; cannot reattach")
+	}
+	return exactPolicyAssignmentReplacement(prior, result.Rows)
+}
+
 func (r *interfacePolicyAssignmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data interfacePolicyAssignmentResourceModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
@@ -79,11 +118,21 @@ func (r *interfacePolicyAssignmentResource) Read(ctx context.Context, req resour
 	if err != nil {
 		var notFound *errs.NotFoundError
 		if errors.As(err, &notFound) {
-			resp.State.RemoveResource(ctx)
+			id, reattachErr := r.reattach(ctx, &data)
+			if reattachErr != nil {
+				resp.Diagnostics.AddError("Unable to Reattach Interface Policy Assignment", reattachErr.Error())
+				return
+			}
+			remote, err = r.client.ApiExtensions().GetInterfacePolicyAssignment(ctx, id)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to Read Reattached Policy Assignment", err.Error())
+				return
+			}
+			data.ID = types.StringValue(id)
+		} else {
+			resp.Diagnostics.AddError("Unable to Read Interface Policy Assignment", err.Error())
 			return
 		}
-		resp.Diagnostics.AddError("Unable to Read Interface Policy Assignment", err.Error())
-		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, interfacePolicyAssignmentFromAPI(remote, data.ID.ValueString()))...)
 }

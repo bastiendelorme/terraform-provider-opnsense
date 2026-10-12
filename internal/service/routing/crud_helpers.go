@@ -51,10 +51,14 @@ type routingCRUDOperations[Model any, APIModel any] struct {
 	Expand  func(*APIModel) (*Model, error)
 	Add     func(context.Context, *APIModel) (string, error)
 	Get     func(context.Context, string) (*APIModel, error)
-	Update  func(context.Context, string, *APIModel) error
-	Delete  func(context.Context, string) error
-	GetID   func(*Model) string
-	SetID   func(*Model, string)
+	// Optional safe UUID reattachment for resources recreated by native HA.
+	// A missing or ambiguous candidate must be returned as an error, never
+	// silently removed from an endpoint Terraform state.
+	Reattach func(context.Context, *Model) (string, *APIModel, error)
+	Update   func(context.Context, string, *APIModel) error
+	Delete   func(context.Context, string) error
+	GetID    func(*Model) string
+	SetID    func(*Model, string)
 }
 
 func createRoutingResource[Model any, APIModel any](ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse, ops routingCRUDOperations[Model, APIModel]) {
@@ -107,11 +111,19 @@ func readRoutingResource[Model any, APIModel any](ctx context.Context, req resou
 	if err != nil {
 		var notFound *errs.NotFoundError
 		if errors.As(err, &notFound) {
-			resp.State.RemoveResource(ctx)
+			if ops.Reattach == nil {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			id, remote, err = ops.Reattach(ctx, &data)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to Reattach "+ops.Name+" After Router Replacement", err.Error())
+				return
+			}
+		} else {
+			resp.Diagnostics.AddError("Unable to Read "+ops.Name, err.Error())
 			return
 		}
-		resp.Diagnostics.AddError("Unable to Read "+ops.Name, err.Error())
-		return
 	}
 	state, err := ops.Expand(remote)
 	if err != nil {

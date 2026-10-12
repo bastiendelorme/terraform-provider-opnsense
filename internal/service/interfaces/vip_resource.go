@@ -157,7 +157,7 @@ func (r *vipResource) Create(ctx context.Context, req resource.CreateRequest, re
 // rebuild. Reattach only by an exact, unique, stable semantic identity. CARP
 // advskew and write-only password are deliberately NOT part of that identity:
 // they are locally configured values and must not be copied from a peer.
-func exactVipReplacement(prior *vipResourceModel, rows []opninterfaces.Vip) (string, error) {
+func exactVipReplacement(prior *vipResourceModel, rows []map[string]any) (string, error) {
 	mode := prior.Mode.ValueString()
 	iface := prior.Interface.ValueString()
 	network := prior.Network.ValueString()
@@ -171,16 +171,30 @@ func exactVipReplacement(prior *vipResourceModel, rows []opninterfaces.Vip) (str
 	if !prior.VHID.IsNull() && !prior.VHID.IsUnknown() {
 		vhid = fmt.Sprintf("%d", prior.VHID.ValueInt64())
 	}
+	field := func(row map[string]any, key string) string {
+		value, _ := row[key].(string)
+		return value
+	}
 	matches := []string{}
 	for _, row := range rows {
-		if row.Mode.String() != mode || row.Interface.String() != iface ||
-			row.Network != network || row.Description != description || row.VHID != vhid {
+		// OPNsense 26.7 search_item rows have subnet + subnet_bits; they
+		// DO NOT have the network field used by get_item and the Go client.
+		subnet := field(row, "subnet")
+		prefix := field(row, "subnet_bits")
+		if subnet == "" || prefix == "" {
 			continue
 		}
-		if row.UUID == "" {
-			return "", fmt.Errorf("matched VIP has no UUID")
+		remoteNetwork := subnet + "/" + prefix
+		if field(row, "mode") != mode || field(row, "interface") != iface ||
+			remoteNetwork != network || field(row, "descr") != description ||
+			field(row, "vhid") != vhid {
+			continue
 		}
-		matches = append(matches, row.UUID)
+		uuid := field(row, "uuid")
+		if uuid == "" {
+			return "", fmt.Errorf("matching VIP has no UUID")
+		}
+		matches = append(matches, uuid)
 	}
 	if len(matches) != 1 {
 		return "", fmt.Errorf("expected exactly one matching VIP, found %d", len(matches))
@@ -189,7 +203,9 @@ func exactVipReplacement(prior *vipResourceModel, rows []opninterfaces.Vip) (str
 }
 
 func (r *vipResource) reattachVip(ctx context.Context, prior *vipResourceModel) (string, error) {
-	result, err := r.client.Interfaces().SearchVip(ctx)
+	result, err := api.Search[map[string]any](
+		r.client.Interfaces().Client(), ctx, opninterfaces.VipOpts.Search,
+	)
 	if err != nil {
 		return "", fmt.Errorf("search replacement VIP: %w", err)
 	}

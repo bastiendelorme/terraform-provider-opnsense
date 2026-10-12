@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -229,6 +230,82 @@ func (r *filterResource) gatewayExists(ctx context.Context, name, ipProtocol str
 	return false, nil
 }
 
+// Native XMLRPC rule UUIDs need not survive a clean router reinstall.
+// Only an exact and unique endpoint rule may be adopted into a retained
+// Terraform state; infrastructure/unrelated rules are never guessed by UUID.
+func normalizedRuleInterfaces(value string) string {
+	parts := strings.Split(value, ",")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			clean = append(clean, part)
+		}
+	}
+	sort.Strings(clean)
+	return strings.Join(clean, ",")
+}
+
+func exactFilterReplacement(prior *filterResourceModel, rows []map[string]any) (string, error) {
+	if prior.Description.IsNull() || prior.Description.IsUnknown() ||
+		prior.Description.ValueString() == "" || prior.Interface == nil ||
+		prior.Filter == nil || prior.Interface.Interface.IsNull() ||
+		prior.Interface.Interface.IsUnknown() {
+		return "", fmt.Errorf("firewall rule lacks a stable description/interface/filter identity")
+	}
+	desired, err := convertFilterSchemaToStruct(prior)
+	if err != nil {
+		return "", fmt.Errorf("convert prior firewall rule: %w", err)
+	}
+	if desired.Interface.String() == "" {
+		return "", fmt.Errorf("firewall rule has no concrete endpoint interface")
+	}
+	field := func(row map[string]any, key string) string {
+		value, ok := row[key].(string)
+		if !ok {
+			return ""
+		}
+		return value
+	}
+	matches := []string{}
+	for _, row := range rows {
+		if field(row, "description") != desired.Description ||
+			normalizedRuleInterfaces(field(row, "interface")) != normalizedRuleInterfaces(desired.Interface.String()) ||
+			field(row, "action") != desired.Action.String() ||
+			field(row, "direction") != desired.Direction.String() ||
+			field(row, "ipprotocol") != desired.IPProtocol.String() ||
+			field(row, "protocol") != desired.Protocol.String() ||
+			field(row, "source_net") != desired.SourceNet ||
+			field(row, "destination_net") != desired.DestinationNet ||
+			field(row, "source_port") != desired.SourcePort ||
+			field(row, "destination_port") != desired.DestinationPort {
+			continue
+		}
+		uuid := field(row, "uuid")
+		if uuid == "" {
+			return "", fmt.Errorf("matching firewall rule has no UUID")
+		}
+		matches = append(matches, uuid)
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected exactly one matching firewall rule, found %d", len(matches))
+	}
+	return matches[0], nil
+}
+
+func (r *filterResource) reattachFilter(ctx context.Context, prior *filterResourceModel) (string, error) {
+	response, err := api.Search[map[string]any](
+		r.client.Firewall().Client(), ctx,
+		api.Endpoint{Path: "/firewall/filter/searchRule", Method: "POST"},
+	)
+	if err != nil {
+		return "", fmt.Errorf("search remote firewall rules: %w", err)
+	}
+	if response == nil || response.Total > len(response.Rows) {
+		return "", fmt.Errorf("incomplete firewall-rule search response; cannot safely reattach")
+	}
+	return exactFilterReplacement(prior, response.Rows)
+}
+
 func (r *filterResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var data *filterResourceModel
 
@@ -244,14 +321,29 @@ func (r *filterResource) Read(ctx context.Context, req resource.ReadRequest, res
 	if err != nil {
 		var notFoundError *errs.NotFoundError
 		if errors.As(err, &notFoundError) {
-			tflog.Warn(ctx, "firewall filter not present in remote, removing from state")
-			resp.State.RemoveResource(ctx)
+			// Legacy non-endpoint rules retain the usual missing-resource
+			// behavior, while named endpoint rules fail closed if ambiguous.
+			if data.Description.IsNull() || data.Description.IsUnknown() ||
+				data.Description.ValueString() == "" {
+				resp.State.RemoveResource(ctx)
+				return
+			}
+			id, reattachErr := r.reattachFilter(ctx, data)
+			if reattachErr != nil {
+				resp.Diagnostics.AddError("Unable to Reattach Firewall Rule After Router Replacement", reattachErr.Error())
+				return
+			}
+			resourceStruct, err = r.client.Firewall().GetFilter(ctx, id)
+			if err != nil {
+				resp.Diagnostics.AddError("Unable to Read Reattached Firewall Rule", err.Error())
+				return
+			}
+			data.Id = types.StringValue(id)
+		} else {
+			resp.Diagnostics.AddError("Client Error",
+				fmt.Sprintf("Unable to read firewall filter, got error: %s", err))
 			return
 		}
-
-		resp.Diagnostics.AddError("Client Error",
-			fmt.Sprintf("Unable to read firewall filter, got error: %s", err))
-		return
 	}
 
 	// Convert OPNsense struct to TF schema
