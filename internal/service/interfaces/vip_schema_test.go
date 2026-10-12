@@ -115,6 +115,27 @@ func TestVipPasswordIsWriteOnly(t *testing.T) {
 	}
 }
 
+func TestConvertVipIPAliasSkewIgnoresLocalHAOverride(t *testing.T) {
+	for _, mode := range []string{"ipalias", "proxyarp"} {
+		m, err := convertVipStructToSchema(&apiinterfaces.Vip{
+			Mode: api.SelectedMap(mode), Interface: api.SelectedMap("endpoint"),
+			Network: "fd42:103:3990::1/64", VHID: "165",
+			AdvertisementBase: "1", AdvertisementSkew: "200",
+		})
+		if err != nil || m.AdvertisementSkew.ValueInt64() != 0 {
+			t.Fatalf("non-CARP mode %s must normalize ignored advskew: %+v, %v", mode, m, err)
+		}
+	}
+	carp, err := convertVipStructToSchema(&apiinterfaces.Vip{
+		Mode: api.SelectedMap("carp"), Interface: api.SelectedMap("endpoint"),
+		Network: "10.250.99.1/30", VHID: "165",
+		AdvertisementBase: "1", AdvertisementSkew: "100",
+	})
+	if err != nil || carp.AdvertisementSkew.ValueInt64() != 100 {
+		t.Fatalf("CARP skew must remain receiver-local: %+v, %v", carp, err)
+	}
+}
+
 func TestConvertVipStructDoesNotReturnPassword(t *testing.T) {
 	t.Parallel()
 	model, err := convertVipStructToSchema(&apiinterfaces.Vip{
