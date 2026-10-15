@@ -89,6 +89,9 @@ func exactPolicyAssignmentReplacement(
 			matches = append(matches, row["uuid"])
 		}
 	}
+	if len(matches) == 0 {
+		return "", errs.NewNotFoundError()
+	}
 	if len(matches) != 1 {
 		return "", fmt.Errorf("expected exactly one matching policy assignment, found %d", len(matches))
 	}
@@ -120,6 +123,11 @@ func (r *interfacePolicyAssignmentResource) Read(ctx context.Context, req resour
 		if errors.As(err, &notFound) {
 			id, reattachErr := r.reattach(ctx, &data)
 			if reattachErr != nil {
+				var replacementNotFound *errs.NotFoundError
+				if errors.As(reattachErr, &replacementNotFound) {
+					resp.State.RemoveResource(ctx)
+					return
+				}
 				resp.Diagnostics.AddError("Unable to Reattach Interface Policy Assignment", reattachErr.Error())
 				return
 			}

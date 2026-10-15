@@ -196,6 +196,9 @@ func exactVipReplacement(prior *vipResourceModel, rows []map[string]any) (string
 		}
 		matches = append(matches, uuid)
 	}
+	if len(matches) == 0 {
+		return "", errs.NewNotFoundError()
+	}
 	if len(matches) != 1 {
 		return "", fmt.Errorf("expected exactly one matching VIP, found %d", len(matches))
 	}
@@ -235,6 +238,11 @@ func (r *vipResource) Read(ctx context.Context, req resource.ReadRequest, resp *
 			}
 			id, reattachErr := r.reattachVip(ctx, data)
 			if reattachErr != nil {
+				var replacementNotFound *errs.NotFoundError
+				if errors.As(reattachErr, &replacementNotFound) {
+					resp.State.RemoveResource(ctx)
+					return
+				}
 				resp.Diagnostics.AddError("Unable to Reattach VIP After Router Replacement", reattachErr.Error())
 				return
 			}
