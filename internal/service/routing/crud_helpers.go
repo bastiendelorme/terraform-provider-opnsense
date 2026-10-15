@@ -117,6 +117,11 @@ func readRoutingResource[Model any, APIModel any](ctx context.Context, req resou
 			}
 			id, remote, err = ops.Reattach(ctx, &data)
 			if err != nil {
+				var replacementNotFound *errs.NotFoundError
+				if errors.As(err, &replacementNotFound) {
+					resp.State.RemoveResource(ctx)
+					return
+				}
 				resp.Diagnostics.AddError("Unable to Reattach "+ops.Name+" After Router Replacement", err.Error())
 				return
 			}

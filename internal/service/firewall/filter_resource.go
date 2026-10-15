@@ -286,6 +286,9 @@ func exactFilterReplacement(prior *filterResourceModel, rows []map[string]any) (
 		}
 		matches = append(matches, uuid)
 	}
+	if len(matches) == 0 {
+		return "", errs.NewNotFoundError()
+	}
 	if len(matches) != 1 {
 		return "", fmt.Errorf("expected exactly one matching firewall rule, found %d", len(matches))
 	}
@@ -330,6 +333,11 @@ func (r *filterResource) Read(ctx context.Context, req resource.ReadRequest, res
 			}
 			id, reattachErr := r.reattachFilter(ctx, data)
 			if reattachErr != nil {
+				var replacementNotFound *errs.NotFoundError
+				if errors.As(reattachErr, &replacementNotFound) {
+					resp.State.RemoveResource(ctx)
+					return
+				}
 				resp.Diagnostics.AddError("Unable to Reattach Firewall Rule After Router Replacement", reattachErr.Error())
 				return
 			}

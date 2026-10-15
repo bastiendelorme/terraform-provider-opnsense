@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/biptec/opnsense-go/pkg/errs"
 	apirouting "github.com/biptec/opnsense-go/pkg/routing"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -47,6 +48,9 @@ func exactGatewayReplacement(prior *gatewayResourceModel, rows []apirouting.Gate
 			return "", fmt.Errorf("matching gateway has no UUID")
 		}
 		matched = append(matched, g.UUID)
+	}
+	if len(matched) == 0 {
+		return "", errs.NewNotFoundError()
 	}
 	if len(matched) != 1 {
 		return "", fmt.Errorf("expected exactly one matching gateway, found %d", len(matched))

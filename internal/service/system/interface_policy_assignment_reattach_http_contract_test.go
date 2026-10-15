@@ -3,12 +3,14 @@ package system
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/biptec/opnsense-go/pkg/api"
+	"github.com/biptec/opnsense-go/pkg/errs"
 	"github.com/biptec/opnsense-go/pkg/opnsense"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -61,8 +63,9 @@ func TestReattachPolicyAssignmentHTTPContract(t *testing.T) {
 	}
 	total = 1
 	rows[0]["policy_id"] = "core"
-	if id, err = r.reattach(ctx, prior); id != "" ||
-		err == nil || !strings.Contains(err.Error(), "found 0") {
-		t.Fatalf("local core policy must not be adopted: %q %v", id, err)
+	id, err = r.reattach(ctx, prior)
+	var notFound *errs.NotFoundError
+	if id != "" || !errors.As(err, &notFound) {
+		t.Fatalf("local core policy must be remote-not-found: %q %v", id, err)
 	}
 }

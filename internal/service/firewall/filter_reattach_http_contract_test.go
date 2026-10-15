@@ -3,12 +3,14 @@ package firewall
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/biptec/opnsense-go/pkg/api"
+	"github.com/biptec/opnsense-go/pkg/errs"
 	"github.com/biptec/opnsense-go/pkg/opnsense"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -73,8 +75,9 @@ func TestReattachFilterHTTPContract(t *testing.T) {
 	}
 	total = 1
 	rows[0]["interface"] = "wan"
-	if id, err = r.reattachFilter(ctx, prior); id != "" ||
-		err == nil || !strings.Contains(err.Error(), "found 0") {
-		t.Fatalf("foreign firewall rule must not be adopted: %q %v", id, err)
+	id, err = r.reattachFilter(ctx, prior)
+	var notFound *errs.NotFoundError
+	if id != "" || !errors.As(err, &notFound) {
+		t.Fatalf("foreign firewall rule must be remote-not-found: %q %v", id, err)
 	}
 }

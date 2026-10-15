@@ -138,6 +138,9 @@ func exactVlanReplacement(prior *vlanResourceModel, candidates []opninterfaces.V
 		}
 		matches = append(matches, row.UUID)
 	}
+	if len(matches) == 0 {
+		return "", errs.NewNotFoundError()
+	}
 	if len(matches) != 1 {
 		return "", fmt.Errorf("expected exactly one matching VLAN, found %d", len(matches))
 	}
@@ -182,6 +185,12 @@ func (r *vlanResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 			// usable without imports or any saved UUID manifest.
 			id, reattachErr := r.reattachVlan(ctx, data)
 			if reattachErr != nil {
+				var replacementNotFound *errs.NotFoundError
+				if errors.As(reattachErr, &replacementNotFound) {
+					tflog.Warn(ctx, "VLAN UUID missing and no semantic replacement exists; removing remote-missing resource from state")
+					resp.State.RemoveResource(ctx)
+					return
+				}
 				resp.Diagnostics.AddError("Unable to Reattach VLAN After Router Replacement", reattachErr.Error())
 				return
 			}

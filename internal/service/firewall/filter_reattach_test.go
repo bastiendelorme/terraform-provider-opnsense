@@ -1,9 +1,11 @@
 package firewall
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/biptec/opnsense-go/pkg/errs"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -44,21 +46,29 @@ func TestExactFilterReplacement(t *testing.T) {
 		t.Fatalf("expected exact reattach: %q %v", id, err)
 	}
 	cases := []struct {
-		name   string
-		rows   []map[string]any
-		needle string
+		name     string
+		rows     []map[string]any
+		needle   string
+		notFound bool
 	}{
-		{"missing", nil, "found 0"},
-		{"ambiguous", []map[string]any{match, match}, "found 2"},
-		{"wrong interface", []map[string]any{cloneRow(match, "interface", "wan")}, "found 0"},
-		{"wrong source", []map[string]any{cloneRow(match, "source_net", "any")}, "found 0"},
-		{"wrong destination", []map[string]any{cloneRow(match, "destination_net", "192.0.2.0/24")}, "found 0"},
-		{"wrong direction", []map[string]any{cloneRow(match, "direction", "out")}, "found 0"},
-		{"missing uuid", []map[string]any{cloneRow(match, "uuid", "")}, "no UUID"},
+		{"missing", nil, "", true},
+		{"ambiguous", []map[string]any{match, match}, "found 2", false},
+		{"wrong interface", []map[string]any{cloneRow(match, "interface", "wan")}, "", true},
+		{"wrong source", []map[string]any{cloneRow(match, "source_net", "any")}, "", true},
+		{"wrong destination", []map[string]any{cloneRow(match, "destination_net", "192.0.2.0/24")}, "", true},
+		{"wrong direction", []map[string]any{cloneRow(match, "direction", "out")}, "", true},
+		{"missing uuid", []map[string]any{cloneRow(match, "uuid", "")}, "no UUID", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := exactFilterReplacement(prior, tc.rows)
+			if tc.notFound {
+				var notFound *errs.NotFoundError
+				if !errors.As(err, &notFound) {
+					t.Fatalf("expected remote-not-found, got %v", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.needle) {
 				t.Fatalf("expected %q, got %v", tc.needle, err)
 			}

@@ -1,9 +1,11 @@
 package interfaces
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/biptec/opnsense-go/pkg/errs"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -31,25 +33,33 @@ func TestExactVipReplacement(t *testing.T) {
 		t.Fatalf("different local CARP skew must not affect reattachment: %q (%v)", got, err)
 	}
 	cases := []struct {
-		name  string
-		state *vipResourceModel
-		rows  []map[string]any
-		want  string
+		name     string
+		state    *vipResourceModel
+		rows     []map[string]any
+		want     string
+		notFound bool
 	}{
-		{"missing", prior, nil, "found 0"},
-		{"ambiguous", prior, []map[string]any{match, match}, "found 2"},
-		{"wrong subnet", prior, []map[string]any{cloneVipRow(match, "subnet", "10.250.98.1")}, "found 0"},
-		{"wrong prefix", prior, []map[string]any{cloneVipRow(match, "subnet_bits", "32")}, "found 0"},
-		{"wrong interface", prior, []map[string]any{cloneVipRow(match, "interface", "wan")}, "found 0"},
-		{"wrong description", prior, []map[string]any{cloneVipRow(match, "descr", "other")}, "found 0"},
-		{"wrong vhid", prior, []map[string]any{cloneVipRow(match, "vhid", "166")}, "found 0"},
-		{"missing uuid", prior, []map[string]any{cloneVipRow(match, "uuid", "")}, "no UUID"},
-		{"legacy wrong field", prior, []map[string]any{cloneVipRow(cloneVipRow(match, "subnet", ""), "network", "10.250.99.1/30")}, "found 0"},
-		{"missing address state", &vipResourceModel{Interface: prior.Interface, Mode: prior.Mode, Network: types.StringNull(), Description: prior.Description}, []map[string]any{match}, "exact semantic identity"},
+		{"missing", prior, nil, "", true},
+		{"ambiguous", prior, []map[string]any{match, match}, "found 2", false},
+		{"wrong subnet", prior, []map[string]any{cloneVipRow(match, "subnet", "10.250.98.1")}, "", true},
+		{"wrong prefix", prior, []map[string]any{cloneVipRow(match, "subnet_bits", "32")}, "", true},
+		{"wrong interface", prior, []map[string]any{cloneVipRow(match, "interface", "wan")}, "", true},
+		{"wrong description", prior, []map[string]any{cloneVipRow(match, "descr", "other")}, "", true},
+		{"wrong vhid", prior, []map[string]any{cloneVipRow(match, "vhid", "166")}, "", true},
+		{"missing uuid", prior, []map[string]any{cloneVipRow(match, "uuid", "")}, "no UUID", false},
+		{"legacy wrong field", prior, []map[string]any{cloneVipRow(cloneVipRow(match, "subnet", ""), "network", "10.250.99.1/30")}, "", true},
+		{"missing address state", &vipResourceModel{Interface: prior.Interface, Mode: prior.Mode, Network: types.StringNull(), Description: prior.Description}, []map[string]any{match}, "exact semantic identity", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, e := exactVipReplacement(tc.state, tc.rows)
+			if tc.notFound {
+				var notFound *errs.NotFoundError
+				if !errors.As(e, &notFound) {
+					t.Fatalf("expected remote-not-found, got %v", e)
+				}
+				return
+			}
 			if e == nil || !strings.Contains(e.Error(), tc.want) {
 				t.Fatalf("expected error containing %q, got %v", tc.want, e)
 			}
