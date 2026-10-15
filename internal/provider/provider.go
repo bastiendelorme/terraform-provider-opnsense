@@ -51,13 +51,14 @@ type opnsenseProvider struct {
 
 // OPNsenseProviderModel describes the provider data model.
 type OPNsenseProviderModel struct {
-	Uri           types.String `tfsdk:"uri"`
-	APIKey        types.String `tfsdk:"api_key"`
-	APISecret     types.String `tfsdk:"api_secret"`
-	AllowInsecure types.Bool   `tfsdk:"allow_insecure"`
-	MaxBackoff    types.Int64  `tfsdk:"max_backoff"`
-	MinBackoff    types.Int64  `tfsdk:"min_backoff"`
-	MaxRetries    types.Int64  `tfsdk:"retries"`
+	Uri            types.String `tfsdk:"uri"`
+	APIKey         types.String `tfsdk:"api_key"`
+	APISecret      types.String `tfsdk:"api_secret"`
+	AllowInsecure  types.Bool   `tfsdk:"allow_insecure"`
+	MaxBackoff     types.Int64  `tfsdk:"max_backoff"`
+	MinBackoff     types.Int64  `tfsdk:"min_backoff"`
+	MaxRetries     types.Int64  `tfsdk:"retries"`
+	RequestTimeout types.Int64  `tfsdk:"request_timeout"`
 }
 
 func (p *opnsenseProvider) Metadata(ctx context.Context, req provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -106,6 +107,13 @@ func (p *opnsenseProvider) Schema(ctx context.Context, req provider.SchemaReques
 				Optional:            true,
 				Validators: []validator.Int64{
 					int64validator.Between(1, 2147483647), // Since we convert the int64 to an int(32), set an upper bound.
+				},
+			},
+			"request_timeout": schema.Int64Attribute{
+				MarkdownDescription: "Maximum total duration in seconds for one OPNsense API request including retries. Alternatively, can be configured using the `OPNSENSE_REQUEST_TIMEOUT` environment variable. Defaults to 120 seconds.",
+				Optional:            true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
 				},
 			},
 		},
@@ -185,6 +193,15 @@ func (p *opnsenseProvider) Configure(ctx context.Context, req provider.Configure
 		)
 	}
 
+	if data.RequestTimeout.IsUnknown() {
+		resp.Diagnostics.AddAttributeError(
+			path.Root("request_timeout"),
+			"Unknown OPNsense API Value: request_timeout",
+			"The provider cannot create the OPNsense API client as there is an unknown configuration value for request_timeout. "+
+				"Either set the value statically in the configuration or use the OPNSENSE_REQUEST_TIMEOUT environment variable.",
+		)
+	}
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -246,6 +263,16 @@ func (p *opnsenseProvider) Configure(ctx context.Context, req provider.Configure
 		retries = data.MaxRetries.ValueInt64()
 	}
 
+	requestTimeoutStr := os.Getenv("OPNSENSE_REQUEST_TIMEOUT")
+	requestTimeout, err := strconv.ParseInt(requestTimeoutStr, 10, 64)
+	if err != nil {
+		// Set to 0 to use client default downstream if string is unparsable
+		requestTimeout = 0
+	}
+	if !data.RequestTimeout.IsNull() {
+		requestTimeout = data.RequestTimeout.ValueInt64()
+	}
+
 	// Ensure expected variables are not empty
 
 	if uri == "" {
@@ -280,13 +307,14 @@ func (p *opnsenseProvider) Configure(ctx context.Context, req provider.Configure
 
 	// Create the OPNsense client
 	opnOptions := api.Options{
-		Uri:           uri,
-		APIKey:        apiKey,
-		APISecret:     apiSecret,
-		AllowInsecure: allowInsecure,
-		MaxBackoff:    maxBackoff,
-		MinBackoff:    minBackoff,
-		MaxRetries:    retries,
+		Uri:            uri,
+		APIKey:         apiKey,
+		APISecret:      apiSecret,
+		AllowInsecure:  allowInsecure,
+		MaxBackoff:     maxBackoff,
+		MinBackoff:     minBackoff,
+		MaxRetries:     retries,
+		RequestTimeout: requestTimeout,
 	}
 	client := api.NewClient(opnOptions)
 
