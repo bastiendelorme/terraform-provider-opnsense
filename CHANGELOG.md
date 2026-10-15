@@ -21,6 +21,8 @@
 
 ### Fixed
 
+- OPNsense API operations now have a configurable total request deadline, preventing a stalled backend reconfigure handler from blocking Terraform/OpenTofu indefinitely.
+- Endpoint semantic reattachment now removes genuinely remote-missing resources from state when no exact replacement exists, while preserving exact reattachment and fail-closed ambiguity handling.
 - HAProxy global settings now adopt the built-in OPNsense singleton on first apply, so fresh deployments no longer require a manual `terraform import`.
 - HAProxy server and backend resources reject duplicate remote names, preventing independent Terraform states from silently creating ambiguous HAProxy configuration.
 - Core HA synchronization now adopts the built-in OPNsense singleton on first apply, so fresh router deployments no longer require a manual `terraform import`.
